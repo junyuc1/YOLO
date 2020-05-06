@@ -97,6 +97,7 @@ def create_modules(blocks):
                 pad = 0
         
             #Add the convolutional layer
+
             conv = nn.Conv2d(prev_filters, filters, kernel_size, stride, pad, bias = bias)
             module.add_module("conv_{0}".format(index), conv)
         
@@ -161,7 +162,7 @@ def create_modules(blocks):
         module_list.append(module)
         prev_filters = filters
         output_filters.append(filters)
-        
+    
     return (net_info, module_list)
 
 class Darknet(nn.Module):
@@ -175,14 +176,21 @@ class Darknet(nn.Module):
         outputs = {}   #We cache the outputs for the route layer
         
         write = 0
-        for i, module in enumerate(modules):        
+        for i, module in enumerate(modules):      
             module_type = (module["type"])
             
-            if module_type == "convolutional" or module_type == "upsample":
+            if module_type == "convolutional":
                 x = self.module_list[i](x)
-    
+                
+            
+            elif module_type == "upsample":
+                x = self.module_list[i](x)
+
+
+
             elif module_type == "route":
                 layers = module["layers"]
+
                 layers = [int(a) for a in layers]
     
                 if (layers[0]) > 0:
@@ -198,13 +206,15 @@ class Darknet(nn.Module):
                     map1 = outputs[i + layers[0]]
                     map2 = outputs[i + layers[1]]
                     x = torch.cat((map1, map2), 1)
-                
     
             elif  module_type == "shortcut":
                 from_ = int(module["from"])
                 x = outputs[i-1] + outputs[i+from_]
-    
-            elif module_type == 'yolo':        
+                
+                
+
+            elif module_type == 'yolo':    
+                
                 anchors = self.module_list[i][0].anchors
                 #Get the input dimensions
                 inp_dim = int (self.net_info["height"])
@@ -221,7 +231,7 @@ class Darknet(nn.Module):
         
                 else:       
                     detections = torch.cat((detections, x), 1)
-        
+                
             outputs[i] = x
         
         return detections
@@ -241,9 +251,9 @@ class Darknet(nn.Module):
         self.seen = self.header[3]   
         
         weights = np.fromfile(fp, dtype = np.float32)
-        
         ptr = 0
         for i in range(len(self.module_list)):
+
             module_type = self.blocks[i + 1]["type"]
     
             #If module_type is convolutional load weights
@@ -264,7 +274,7 @@ class Darknet(nn.Module):
         
                     #Get the number of weights of Batch Norm Layer
                     num_bn_biases = bn.bias.numel()
-        
+                    
                     #Load the weights
                     bn_biases = torch.from_numpy(weights[ptr:ptr + num_bn_biases])
                     ptr += num_bn_biases
@@ -307,15 +317,18 @@ class Darknet(nn.Module):
                 #Let us load the weights for the Convolutional layers
                 num_weights = conv.weight.numel()
                 
+                
                 #Do the same as above for weights
                 conv_weights = torch.from_numpy(weights[ptr:ptr+num_weights])
+               
                 ptr = ptr + num_weights
                 
                 conv_weights = conv_weights.view_as(conv.weight.data)
                 conv.weight.data.copy_(conv_weights)
+                
 
-model = Darknet("cfg/yolov3.cfg")
-model.load_weights("yolov3.weights")
-inp = get_test_input()
-pred = model(inp, torch.cuda.is_available())
-print (pred)
+#model = Darknet("cfg/yolov3.cfg")
+#model.load_weights("yolov3.weights")
+#inp = get_test_input()
+#pred = model(inp, torch.cuda.is_available())
+#write_results(pred, 0.8, 80)
