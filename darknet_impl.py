@@ -1,14 +1,46 @@
 from __future__ import division
 import numpy as np
 from model import *
+import torch 
+import torch.nn as nn
+import torch.nn.functional as F 
+from torch.autograd import Variable
 import cv2 
+from darknet import *
+import time
+import myModule
 
-def get_input():
-	img = cv2.imread("image/eagle.jpg")
+def get_input(name):
+	img = cv2.imread(name)
 	img = cv2.resize(img, (416,416))          #Resize to the input dimension
 	img_ =  img[:,:,::-1].transpose((2,0,1))  # BGR -> RGB | H X W C -> C X H X W 
 	img_ = img_[np.newaxis,:,:,:]/255.0       #Add a channel at 0 (for batch) | Normalise
-	return img_
+	return img_.astype(np.float32)
+
+def letterbox_image(img, inp_dim):
+    '''resize image with unchanged aspect ratio using padding'''
+    img_w, img_h = img.shape[1], img.shape[0]
+    w, h = inp_dim
+    new_w = int(img_w * min(w/img_w, h/img_h))
+    new_h = int(img_h * min(w/img_w, h/img_h))
+    resized_image = cv2.resize(img, (new_w,new_h), interpolation = cv2.INTER_CUBIC)
+    
+    canvas = np.full((inp_dim[1], inp_dim[0], 3), 128)
+
+    canvas[(h-new_h)//2:(h-new_h)//2 + new_h,(w-new_w)//2:(w-new_w)//2 + new_w,  :] = resized_image
+    
+    return canvas
+
+def prep_image(img, inp_dim):
+	"""
+	Prepare image for inputting to the neural network. 
+
+	Returns a Variable 
+	"""
+	img = (letterbox_image(img, (inp_dim, inp_dim)))
+	img = img[:,:,::-1].transpose((2,0,1)).copy()
+	img = torch.from_numpy(img).float().div(255.0).unsqueeze(0)
+	return img
 
 def parse_cfg(cfgfile):
 	"""
@@ -46,8 +78,8 @@ def get_network(model_cfg, model_weights):
 	depth = 3
 	filter_list = []
 	weights = open(model_weights, "rb")
+	
 	weights = np.fromfile(weights, dtype = np.float32)[5:]
-
 	weight_pos = 0
 	for i in range(len(model_cfg)):
 		cfg = model_cfg[i]
@@ -154,6 +186,7 @@ class DarkNet:
 		pred = None
 
 		for i in range(len(self.model_cfg)):
+			print(i)
 			cfg = self.model_cfg[i]
 			model_type = cfg["type"]
 			cur_model = self.network[i]
@@ -167,7 +200,6 @@ class DarkNet:
 				layers_out.append(output)
 			
 			elif (model_type == "yolo"):
-				
 				output = cur_model.forward(self.image_size, output)
 				layers_out.append(output)
 				if first_yolo:
@@ -180,6 +212,70 @@ class DarkNet:
 
 if __name__ == "__main__":
 	DN = DarkNet()
-	inp = get_input()
-	my_out = DN.forward(inp)
+	imp = []
+	for i in range(2):
+		im1 = cv2.imread("image/dog.jpg")
+		im1 = np.array(prep_image(im1, 416))[0]
+		
+		im2 = cv2.imread("image/eagle.jpg")
+		im2 = np.array(prep_image(im2, 416))[0]
+		
+		im3 = cv2.imread("image/giraffe.jpg")
+		im3 = np.array(prep_image(im3, 416))[0]
+		
+		im4 = cv2.imread("image/herd_of_horses.jpg")
+		im4 = np.array(prep_image(im4, 416))[0]
+		
+		im5 = cv2.imread("image/img1.jpg")
+		im5 = np.array(prep_image(im5, 416))[0]
+		
+		im6 = cv2.imread("image/img2.jpg")
+		im6 = np.array(prep_image(im6, 416))[0]
+
+		im7 = cv2.imread("image/img3.jpg")
+		im7 = np.array(prep_image(im7, 416))[0]
+
+		im8 = cv2.imread("image/img4.jpg")
+		im8 = np.array(prep_image(im8, 416))[0]
+		imp.append(im1)
+		imp.append(im2)
+		imp.append(im3)
+		imp.append(im4)
+		imp.append(im5)
+		imp.append(im6)
+		imp.append(im7)
+		imp.append(im8)
+
+	start = time.time()
+	imp = np.array(imp)
+	out = DN.forward(imp)
+	end = time.time()
+	print("Time taken: " + str(end - start))
+
+
+	torch_imp = torch.from_numpy(imp)
+
+	model = Darknet("cfg/yolov3.cfg")
+	model.load_weights("yolov3.weights")
+	start = time.time()
+	torch_out = model(torch_imp, False)
+	end = time.time()
+	print("Time taken: " + str(end - start))
+	rtol = 1e-04
+	atol = 1e-04
+	print(np.allclose(np.array(torch_out), out, rtol, atol))
+	'''
+	torch_imp = torch.from_numpy(imp)
+
+	model = Darknet("cfg/yolov3.cfg")
+	model.load_weights("yolov3.weights")
+	torch_out = model(torch_imp, False)
+
+	my_out = DN.forward(imp)
+
+	
+
+	print(my_out.shape)
+	print(list(torch_out.size()))
+	print(np.allclose(torch_out, my_out, rtol, atol))'''
 

@@ -5,6 +5,8 @@ import multiprocessing
 from multiprocessing import Process, Lock, Pool
 import threading
 import concurrent.futures
+import myModule
+import myModule_CUDA
 
 def get_im2col_indices(x_shape, field_height, field_width, padding=1, stride=1):
 	N, C, H, W = x_shape
@@ -42,7 +44,7 @@ class Convolution:
 		self.stride = stride
 		self.pad = pad
 		self.weights = np.zeros((filters, depth, size, size))
-		self.bias = np.zeros((filters, 1))
+		self.bias = np.zeros((filters, 1), dtype=np.float32)
 
 	def load_weights(self, weights):
 		weights = np.reshape(weights, (self.filters, self.depth, self.size, self.size))
@@ -76,6 +78,32 @@ class Convolution:
 		weight_flat = self.weights.reshape(self.filters, -1)
 		input_flat = im2col(inputs, self.size, self.size, self.pad, self.stride)
 		flat_feature = np.matmul(weight_flat, input_flat) + self.bias
+		out_width = (inputs.shape[3] + 2 * self.pad - self.size) // self.stride + 1
+		out_height = (inputs.shape[2] + 2 * self.pad - self.size) // self.stride + 1
+		flat_feature_trans = flat_feature.reshape(self.filters, out_height, out_width, inputs.shape[0])
+		feature = flat_feature_trans.transpose(3, 0, 1, 2)
+		return feature
+
+	def forward_c_seq(self, inputs):
+		inp = np.pad(inputs, [(0, 0), (0, 0), (self.pad, self.pad), (self.pad, self.pad)], 'constant', constant_values=0.0)
+		return myModule.Conv_Seq(inp, self.weights, self.bias, self.stride)
+
+	def forward_c_par_omp(self, inputs):
+		inp = np.pad(inputs, [(0, 0), (0, 0), (self.pad, self.pad), (self.pad, self.pad)], 'constant', constant_values=0.0)
+		return myModule.Conv_Par_OMP(inp, self.weights, self.bias, self.stride)
+
+	def forward_c_par_cuda(self, inputs):
+		inp = np.pad(inputs, [(0, 0), (0, 0), (self.pad, self.pad), (self.pad, self.pad)], 'constant', constant_values=0.0)
+		bias = np.reshape(self.bias, self.filters)
+		out_size = (inp.shape[3] - self.weights.shape[3]) // self.stride + 1
+		dims = np.array(list(inp.shape) + list(self.weights.shape) + [out_size])
+		dims = dims.astype('float32')
+		return myModule_CUDA.Conv_Par_CUDA(inp, self.weights, bias, dims, self.stride)
+
+	def forward_c_par_matmul_cuda(self, inputs):
+		weight_flat = self.weights.reshape(self.filters, -1)
+		input_flat = im2col(inputs, self.size, self.size, self.pad, self.stride)
+		flat_feature = myModule_CUDA.Matmul_Par_CUDA(weight_flat, input_flat, weight_flat.shape[0], weight_flat.shape[1], input_flat.shape[0], input_flat.shape[1]) + self.bias 
 		out_width = (inputs.shape[3] + 2 * self.pad - self.size) // self.stride + 1
 		out_height = (inputs.shape[2] + 2 * self.pad - self.size) // self.stride + 1
 		flat_feature_trans = flat_feature.reshape(self.filters, out_height, out_width, inputs.shape[0])
@@ -125,7 +153,7 @@ class Conv_Block:
 		self.num_models += 1
 
 	def forward(self, input):
-		output = self.models[0].forward(input)
+		output = self.models[0].forward_c_par_cuda(input)
 		for i in range(1, self.num_models):
 			output = self.models[i].forward(output)
 		return output

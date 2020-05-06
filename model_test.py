@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 import numpy as np
 from util import * 
-from darknet import *
 from darknet_impl import *
 import time
 import multiprocessing
@@ -13,6 +12,8 @@ from multiprocessing import Process, Lock, Pool
 import threading
 import concurrent.futures
 from model import *
+import myModule
+import myModule_CUDA
 
 def check_conv(torch_out, my_out):
 	torch_out = torch_out.data.numpy()
@@ -20,8 +21,8 @@ def check_conv(torch_out, my_out):
 	atol = 1e-04
 	return np.allclose(torch_out, my_out, rtol, atol)
 
-my_inp = get_input()
-torch_inp = get_test_input()
+my_inp = get_input("image/eagle.jpg")
+torch_inp = torch.from_numpy(my_inp)
 
 fp = open("yolov3.weights", "rb")
 weights = np.fromfile(fp, dtype = np.float32)
@@ -37,10 +38,112 @@ def test_conv_1():
 	my_conv.load_weights(my_weights)
 
 	torch_result = torch_conv(torch_inp)
-	my_result = my_conv.forward(my_inp)
+	my_result = my_conv.forward_c_par_matmul_cuda(my_inp)
 
 	if check_conv(torch_result, my_result):
 		print("test conv 1 passed")
+
+def test_conv_1_c_seq():
+	my_conv = Convolution(3, 32, 3, 1, 1)
+	torch_conv = nn.Conv2d(3, 32, 3, 1, 1, bias = False)
+
+	my_weights = weights[128:992]
+	torch_weights = torch.from_numpy(weights[128:992])
+
+	torch_conv.weight.data.copy_(torch_weights.view_as(torch_conv.weight.data))
+	my_conv.load_weights(my_weights)
+
+	torch_result = torch_conv(torch_inp)
+	my_result = my_conv.forward_c_seq(my_inp)
+
+	if check_conv(torch_result, my_result):
+		print("test conv c seq 1 passed")
+
+def test_conv_c_par_cuda():
+	my_inp = cv2.imread("image/dog.jpg")
+	my_inp = np.array(prep_image(my_inp, 416))[:,:2,:3,:3]
+	torch_inp = torch.from_numpy(my_inp)
+
+	my_conv = Convolution(2, 2, 2, 1, 1)
+	torch_conv = nn.Conv2d(2, 2, 2, 1, 1, bias = False)
+
+	my_weights = weights[128:144]
+	torch_weights = torch.from_numpy(weights[128:144])
+
+	torch_conv.weight.data.copy_(torch_weights.view_as(torch_conv.weight.data))
+	my_conv.load_weights(my_weights)
+	
+
+	torch_result = torch_conv(torch_inp)
+	
+	my_result = my_conv.forward_c_par_matmul_cuda(my_inp)
+	
+	print(my_result)
+	if check_conv(torch_result, my_result):
+		print("test conv c par cuda passed")
+
+def test_conv_c_par_omp():
+	my_inp = []
+	for i in range(4):
+		im1 = cv2.imread("image/dog.jpg")
+		im1 = np.array(prep_image(im1, 416))[0]
+		im2 = cv2.imread("image/eagle.jpg")
+		im2 = np.array(prep_image(im2, 416))[0]
+		im3 = cv2.imread("image/giraffe.jpg")
+		im3 = np.array(prep_image(im3, 416))[0]
+		im4 = cv2.imread("image/herd_of_horses.jpg")
+		im4 = np.array(prep_image(im4, 416))[0]
+		im5 = cv2.imread("image/img1.jpg")
+		im5 = np.array(prep_image(im5, 416))[0]
+		im6 = cv2.imread("image/img2.jpg")
+		im6 = np.array(prep_image(im6, 416))[0]
+		im7 = cv2.imread("image/img3.jpg")
+		im7 = np.array(prep_image(im7, 416))[0]
+		im8 = cv2.imread("image/img4.jpg")
+		im8 = np.array(prep_image(im8, 416))[0]
+		my_inp.append(im1)
+		my_inp.append(im2)
+		my_inp.append(im3)
+		my_inp.append(im4)
+		my_inp.append(im5)
+		my_inp.append(im6)
+		my_inp.append(im7)
+		my_inp.append(im8)
+	my_inp = np.array(my_inp)
+	my_inp = np.ones((8, 32, 416, 416), dtype="float32")
+	torch_inp = torch.from_numpy(my_inp)
+
+	my_conv = Convolution(32, 64, 3, 2, 1)
+	torch_conv = nn.Conv2d(32, 64, 3, 2, 1, bias = True)
+
+	my_weights = weights[128:18560]
+	torch_weights = torch.from_numpy(weights[128:18560])
+
+	my_bias = weights[1000:1064]
+	torch_bias = torch.from_numpy(weights[1000:1064])
+
+	torch_conv.weight.data.copy_(torch_weights.view_as(torch_conv.weight.data))
+	my_conv.load_weights(my_weights)
+
+	torch_conv.bias.data.copy_(torch_bias.view_as(torch_conv.bias.data))
+	my_conv.load_bias(my_bias)
+
+
+	start = time.time()
+	torch_result = torch_conv(torch_inp)
+	
+	end = time.time()
+	print("torch time " + str(end - start))
+
+	start = time.time()
+	my_result = my_conv.forward_c_par_cuda(my_inp)
+	
+	end = time.time()
+	print("my time " + str(end - start))
+
+	if check_conv(torch_result, my_result):
+		print("passed")
+
 
 def test_conv_2():
 	my_conv = Convolution(3, 32, 3, 1, 5)
@@ -57,6 +160,38 @@ def test_conv_2():
 
 	if check_conv(torch_result, my_result):
 		print("test conv 2 passed")
+
+def test_conv_2_c_seq():
+	my_conv = Convolution(3, 32, 3, 1, 5)
+	torch_conv = nn.Conv2d(3, 32, 3, 1, 5, bias = False)
+
+	my_weights = weights[128:992]
+	torch_weights = torch.from_numpy(weights[128:992])
+
+	torch_conv.weight.data.copy_(torch_weights.view_as(torch_conv.weight.data))
+	my_conv.load_weights(my_weights)
+
+	torch_result = torch_conv(torch_inp)
+	my_result = my_conv.forward_c_seq(my_inp)
+
+	if check_conv(torch_result, my_result):
+		print("test conv c seq 2 passed")
+
+def test_conv_2_c_par_cuda():
+	my_conv = Convolution(3, 32, 3, 1, 5)
+	torch_conv = nn.Conv2d(3, 32, 3, 1, 5, bias = False)
+
+	my_weights = weights[128:992]
+	torch_weights = torch.from_numpy(weights[128:992])
+
+	torch_conv.weight.data.copy_(torch_weights.view_as(torch_conv.weight.data))
+	my_conv.load_weights(my_weights)
+
+	torch_result = torch_conv(torch_inp)
+	my_result = my_conv.forward_c_par_cuda(my_inp)
+
+	if check_conv(torch_result, my_result):
+		print("test conv c seq 2 passed")
 
 def test_conv_3():
 	my_conv = Convolution(3, 32, 3, 1, 5)
@@ -80,6 +215,50 @@ def test_conv_3():
 	if check_conv(torch_result, my_result):
 		print("test conv 3 passed")
 
+def test_conv_3_c_seq():
+	my_conv = Convolution(3, 32, 3, 1, 5)
+	torch_conv = nn.Conv2d(3, 32, 3, 1, 5, bias = True)
+
+	my_weights = weights[128:992]
+	torch_weights = torch.from_numpy(weights[128:992])
+
+	my_bias = weights[128:160]
+	torch_bias = torch.from_numpy(weights[128:160])
+
+	torch_conv.weight.data.copy_(torch_weights.view_as(torch_conv.weight.data))
+	my_conv.load_weights(my_weights)
+
+	torch_conv.bias.data.copy_(torch_bias.view_as(torch_conv.bias.data))
+	my_conv.load_bias(my_bias)
+
+	torch_result = torch_conv(torch_inp)
+	my_result = my_conv.forward_c_seq(my_inp)
+
+	if check_conv(torch_result, my_result):
+		print("test conv c seq 3 passed")
+
+def test_conv_3_c_par_cuda():
+	my_conv = Convolution(3, 32, 3, 1, 5)
+	torch_conv = nn.Conv2d(3, 32, 3, 1, 5, bias = True)
+
+	my_weights = weights[128:992]
+	torch_weights = torch.from_numpy(weights[128:992])
+
+	my_bias = weights[128:160]
+	torch_bias = torch.from_numpy(weights[128:160])
+
+	torch_conv.weight.data.copy_(torch_weights.view_as(torch_conv.weight.data))
+	my_conv.load_weights(my_weights)
+
+	torch_conv.bias.data.copy_(torch_bias.view_as(torch_conv.bias.data))
+	my_conv.load_bias(my_bias)
+
+	torch_result = torch_conv(torch_inp)
+	my_result = my_conv.forward_c_par_cuda(my_inp)
+
+	if check_conv(torch_result, my_result):
+		print("test conv c seq 3 passed")
+
 def test_conv_4():
 	my_conv = Convolution(3, 32, 3, 1, 0)
 	torch_conv = nn.Conv2d(3, 32, 3, 1, 0, bias = True)
@@ -101,6 +280,50 @@ def test_conv_4():
 
 	if check_conv(torch_result, my_result):
 		print("test conv 4 passed")
+
+def test_conv_4_c_seq():
+	my_conv = Convolution(3, 32, 3, 1, 0)
+	torch_conv = nn.Conv2d(3, 32, 3, 1, 0, bias = True)
+
+	my_weights = weights[128:992]
+	torch_weights = torch.from_numpy(weights[128:992])
+
+	my_bias = weights[128:160]
+	torch_bias = torch.from_numpy(weights[128:160])
+
+	torch_conv.weight.data.copy_(torch_weights.view_as(torch_conv.weight.data))
+	my_conv.load_weights(my_weights)
+
+	torch_conv.bias.data.copy_(torch_bias.view_as(torch_conv.bias.data))
+	my_conv.load_bias(my_bias)
+
+	torch_result = torch_conv(torch_inp)
+	my_result = my_conv.forward_c_seq(my_inp)
+
+	if check_conv(torch_result, my_result):
+		print("test conv c seq 4 passed")
+
+def test_conv_4_c_par_cuda():
+	my_conv = Convolution(3, 32, 3, 1, 0)
+	torch_conv = nn.Conv2d(3, 32, 3, 1, 0, bias = True)
+
+	my_weights = weights[128:992]
+	torch_weights = torch.from_numpy(weights[128:992])
+
+	my_bias = weights[128:160]
+	torch_bias = torch.from_numpy(weights[128:160])
+
+	torch_conv.weight.data.copy_(torch_weights.view_as(torch_conv.weight.data))
+	my_conv.load_weights(my_weights)
+
+	torch_conv.bias.data.copy_(torch_bias.view_as(torch_conv.bias.data))
+	my_conv.load_bias(my_bias)
+
+	torch_result = torch_conv(torch_inp)
+	my_result = my_conv.forward_c_par_cuda(my_inp)
+
+	if check_conv(torch_result, my_result):
+		print("test conv c seq 4 passed")
 
 def test_bn_1():
 	my_bn = Batch_Normalize(3)
@@ -396,7 +619,18 @@ def test_upsample_2():
 		print("test upsample 2 passed")
 
 if __name__ == "__main__":
-	test_conv_1()
+	'''print(myModule_CUDA.Matmul_Par_CUDA(np.array([[1,2],[3,4]], dtype="float32"), np.array([[1,1],[4,0]], dtype="float32"), np.array([1,1], dtype="float32"), 2, 2, 2, 2))'''
+	test_conv_c_par_cuda()
+	'''
+	test_conv_c_par_omp()
+	test_conv_2_c_par_cuda()
+	test_conv_3_c_par_cuda()
+	test_conv_4_c_par_cuda()
+	test_conv_1_c_seq()
+	test_conv_2_c_seq()
+	test_conv_3_c_seq()
+	test_conv_4_c_seq()
+	test_conv_4_c_seq()
 	test_conv_2()
 	test_conv_3()
 	test_conv_4()
@@ -409,4 +643,4 @@ if __name__ == "__main__":
 	test_conv_blk_2()
 	test_conv_blk_3()
 	test_upsample_1()
-	test_upsample_2()
+	test_upsample_2()'''
