@@ -1,0 +1,278 @@
+from __future__ import division
+import time
+import torch 
+import torch.nn as nn
+from torch.autograd import Variable
+import numpy as np
+import cv2 
+from pycuda_nms import *
+import argparse
+import os 
+import os.path as osp
+#from darknet import Darknet
+from darknet_impl import *
+#from preprocess import prep_image, inp_to_image
+import pandas as pd
+import random 
+import pickle as pkl
+import itertools
+from joblib import Parallel, delayed
+import multiprocessing
+
+def arg_parse():
+    """
+    Parse arguements to the detect module
+    
+    """
+    
+    
+    parser = argparse.ArgumentParser(description='YOLO v3 Detection Module')
+   
+    parser.add_argument("--images", dest = 'images', help = 
+                        "Image / Directory containing images to perform detection upon",
+                        default = "imgs", type = str)
+    parser.add_argument("--det", dest = 'det', help = 
+                        "Image / Directory to store detections to",
+                        default = "det", type = str)
+    parser.add_argument("--bs", dest = "bs", help = "Batch size", default = 1)
+    parser.add_argument("--confidence", dest = "confidence", help = "Object Confidence to filter predictions", default = 0.5)
+    parser.add_argument("--nms_thresh", dest = "nms_thresh", help = "NMS Threshhold", default = 0.4)
+    parser.add_argument("--cfg", dest = 'cfgfile', help = 
+                        "Config file",
+                        default = "cfg/yolov3.cfg", type = str)
+    parser.add_argument("--weights", dest = 'weightsfile', help = 
+                        "weightsfile",
+                        default = "yolov3.weights", type = str)
+    parser.add_argument("--reso", dest = 'reso', help = 
+                        "Input resolution of the network. Increase to increase accuracy. Decrease to increase speed",
+                        default = "416", type = str)
+    parser.add_argument("--scales", dest = "scales", help = "Scales to use for detection",
+                        default = "1,2,3", type = str)
+    
+    return parser.parse_args()
+
+template = """
+__device__
+float IOUcalc(float* b1, float* b2)
+{
+    //y1, x1, h, w
+    float x_inter, x2_inter, y_inter, y2_inter;
+
+    x_inter = max(b1[0],b2[0]);
+    y_inter = max(b1[1],b2[1]);
+
+    printf("b1_x1 is %d", b1[0]);
+    x2_inter = min(b1[2],b2[2]);
+    y2_inter = min(b1[3],b2[3]);
+    
+    float w = (float)max((float)0, x2_inter - x_inter+1);  
+    float h = (float)max((float)0, y2_inter - y_inter+1);  
+
+    float b1_area = (b1[2] - b1[0] + 1)*(b1[3] - b1[1] + 1);
+    float b2_area = (b2[2] - b2[0] + 1)*(b2[3] - b2[1] + 1);
+    float norm = w*h;
+    float inter = ((w*h)/(b1_area + b2_area - norm));
+    return inter;
+}
+
+__global__
+void NMS_GPU(float *d_b, bool *d_res, float thresh)
+{
+    int abs_y = (blockIdx.y * blockDim.y) + threadIdx.y;
+    int abs_x = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+    //printf("y_coord is %d", abs_y);
+    //printf("x_coord is %d", abs_x);
+    float* b1 = &d_b[abs_y];
+    float* b2 = &d_b[abs_x];
+            
+    float iou = IOUcalc(b1,b2);
+    //printf("IOU is %d", iou);            
+    if(iou>thresh)
+    {            
+        d_res[abs_x] = false; 
+    }
+
+}
+"""
+
+def prep_image_no_tensor(img, input_dim):
+    orig_im = cv2.imread(img)
+    dim = orig_im.shape[1], orig_im.shape[0]
+    img = (letterbox_image(orig_im, (416,416)))
+    img = img[:,:,::-1].transpose((2,0,1)).copy()
+    img = img/255.0
+    return img, orig_im, dim
+
+
+def get_image_list(images):
+	#args = arg_parse()
+	images = args.images
+	try:
+	    imlist = [osp.join(osp.realpath('.'), images, img) for img in os.listdir(images) if os.path.splitext(img)[1] == '.png' or os.path.splitext(img)[1] =='.jpeg' or os.path.splitext(img)[1] =='.jpg']
+	except NotADirectoryError:
+	    imlist = []
+	    imlist.append(osp.join(osp.realpath('.'), images))
+	except FileNotFoundError:
+	    print ("No file or directory with the name {}".format(images))
+	    exit()
+	return imlist
+
+
+def read_images(imlist):
+    read_from_directory_timer = time.time()
+    try:
+        imlist = [osp.join(osp.realpath('.'), images, img) for img in os.listdir(images) if os.path.splitext(img)[1] == '.png' or os.path.splitext(img)[1] =='.jpeg' or os.path.splitext(img)[1] =='.jpg']
+    except NotADirectoryError:
+        imlist = []
+        imlist.append(osp.join(osp.realpath('.'), images))
+    except FileNotFoundError:
+        print ("No file or directory with the name {}".format(images))
+        exit()
+            
+    if not os.path.exists(det):
+        os.makedirs(det)
+
+    load_batch_timer = time.time()
+    loaded_ims = [cv2.imread(x) for x in imlist]
+    load_batch_end_timer = time.time()
+    time1 = load_batch_timer - read_from_directory_timer
+    time2 = load_batch_end_timer - load_batch_timer
+    print("Time for reading images from directory is %d"% time1)
+    print("Time for loading images with OpenCv is %d" %time2)
+    return imlist, loaded_ims
+    #time code for timer 
+
+def get_input_data_from_loaded_img(imlist):
+    batches = list(map(prep_image_no_tensor, imlist, [inp_dim for x in range(len(imlist))]))
+    im_batches = [x[0] for x in batches]
+    orig_ims = [x[1] for x in batches]
+    im_dim_list = [x[2] for x in batches]
+    print(type(im_dim_list))
+
+    im_dim_list = torch.FloatTensor(im_dim_list).repeat(1,2)
+    im_dim_list = np.asarray(im_dim_list)
+    leftover = 0
+    return im_batches, orig_ims, im_dim_list
+
+
+def run_through_detect(im_batch, imlist, im_dim_list, 
+						model, confidence, nms_thresh, inp_dim, det, b_size, cuda_code):
+	i = 0
+	write = False
+	start_det_loop = time.time()
+	objs = {}
+	#print(len(im_batch))
+	#print(im_batch[0])
+	inputs = range(10) 
+	for img in im_batch[:3]:
+    #load the image 
+		start = time.time()
+		img = np.reshape(img,(batch_size, img.shape[0], img.shape[1], img.shape[2]))
+		prediction = model.forward(img)
+		prediction = write_results(prediction, confidence, num_classes, cuda_code) 
+		print(prediction) 
+		if type(prediction) == int:
+			i += 1
+			continue
+		end = time.time()
+		prediction[:,0] += i*batch_size      
+		if (not write):
+			output = prediction
+			write = 1
+		else:
+			output = np.concatenate([output,prediction])
+		for im_num, image in enumerate(imlist[i*batch_size: min((i +  1)*batch_size, len(imlist))]):
+			im_id = i*batch_size + im_num
+			objs = [classes[int(x[-1])] for x in output if int(x[0]) == im_id]
+			print("{0:20s} predicted in {1:6.3f} seconds".format(image.split("/")[-1], (end - start)/batch_size))
+			print("{0:20s} {1:s}".format("Objects Detected:", " ".join(objs)))
+			print("----------------------------------------------------------")
+	i += 1
+	return output
+
+def convert_output(output, im_dim_list): 
+	im_dim_list = torch.from_numpy(im_dim_list)
+	output = torch.from_numpy(output)
+	im_dim_list = torch.index_select(im_dim_list, 0, output[:,0].long())
+	scaling_factor = torch.min(416/im_dim_list,1)[0].view(-1,1)
+	output[:,[1,3]] -= (inp_dim - scaling_factor*im_dim_list[:,0].view(-1,1))/2
+	output[:,[2,4]] -= (inp_dim - scaling_factor*im_dim_list[:,1].view(-1,1))/2
+
+	output[:,1:5] /= scaling_factor
+	for i in range(output.shape[0]):
+		output[i, [1,3]] = torch.clamp(output[i, [1,3]], 0.0, im_dim_list[i,0])
+		output[i, [2,4]] = torch.clamp(output[i, [2,4]], 0.0, im_dim_list[i,1])
+	return output, im_dim_list
+
+
+def write(x, results):
+	c1 = tuple(x[1:3].int())
+	c2 = tuple(x[3:5].int())
+	img = results[int(x[0])]
+	cls = int(x[-1])
+	color = random.choice(colors)
+	label = "{0}".format(classes[cls])
+	cv2.rectangle(img, c1, c2,color, 1)
+	t_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_PLAIN, 1 , 1)[0]
+	c2 = c1[0] + t_size[0] + 3, c1[1] + t_size[1] + 4
+	cv2.rectangle(img, c1, c2,color, -1)
+	cv2.putText(img, label, (c1[0], c1[1] + t_size[1] + 4), cv2.FONT_HERSHEY_PLAIN, 1, [225,255,255], 1);
+	return img
+
+#read_images(imlist)
+#load_img_parallel(imlist)
+    
+if __name__=="__main__": 
+	leftover = 0
+	num_classes = 80
+	classes = load_classes('data/coco.names') 
+	args = arg_parse()
+	print(args)
+	scales = args.scales
+	images = args.images
+	batch_size = int(args.bs)
+	confidence = float(args.confidence)
+	nms_thresh = float(args.nms_thresh)
+	det = args.det
+	inp_dim = int(args.reso) 
+	batch_size = args.bs
+	start = 0
+	model = DarkNet()
+#model.load_weights(args.weightsfile)    
+	imlist = get_image_list(images)
+	imlist, loaded_images = read_images(imlist)
+	im_batches, orig_ims, im_dim_list = get_input_data_from_loaded_img(imlist)
+
+	output = run_through_detect(im_batches, imlist, 
+								im_dim_list, model,
+								confidence, nms_thresh, inp_dim, 
+								det, batch_size,template)
+
+	output, im_dim_list = convert_output(output, im_dim_list)
+	output_recast = time.time()
+	class_load = time.time()
+	colors = pkl.load(open("pallete", "rb"))
+	list(map(lambda x: write(x, loaded_images), output))
+
+	det_names = pd.Series(imlist).apply(lambda x: "{}/det_{}".format(det,x.split("/")[-1]))
+
+	list(map(cv2.imwrite, det_names, loaded_images))
+
+
+	end = time.time()
+	"""
+	print("SUMMARY")
+	print("----------------------------------------------------------")
+	print("{:25s}: {}".format("Task", "Time Taken (in seconds)"))
+	print()
+	print("{:25s}: {:2.3f}".format("Reading addresses", load_batch - read_dir))
+	print("{:25s}: {:2.3f}".format("Loading batch", start_det_loop - load_batch))
+	print("{:25s}: {:2.3f}".format("Detection (" + str(len(imlist)) +  " images)", output_recast - start_det_loop))
+	print("{:25s}: {:2.3f}".format("Output Processing", class_load - output_recast))
+	print("{:25s}: {:2.3f}".format("Drawing Boxes", end - draw))
+	print("{:25s}: {:2.3f}".format("Average time_per_img", (end - load_batch)/len(imlist)))
+	print("----------------------------------------------------------")
+    """
+	print("Finished!")
+

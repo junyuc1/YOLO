@@ -1,11 +1,44 @@
 from __future__ import division
 
 import torch 
-import torch.nn as nn
-import torch.nn.functional as F 
-from torch.autograd import Variable
 import numpy as np
 import cv2 
+from pycuda.compiler import SourceModule
+import pycuda.autoinit
+import pycuda.driver as drv
+import PIL.Image as Image
+import torch
+import torchvision
+import string
+import time
+import copy
+import math
+
+def cuda_nms(modules, boxes, scores, thresh):
+   
+    print(boxes)
+    num_boxes = boxes.shape[0]
+    result = np.array([True]*num_boxes, dtype=np.bool)
+    
+    # Perform nms on GPU
+    NMS_GPU = modules.get_function("NMS_GPU")
+    #use drv.InOut instead of drv.Out so the value of results can be passed in
+    
+    #Setting1:works only when count<=1024
+    grid_size, block_size = (1,num_boxes,1), (num_boxes,1,1)
+    
+    #Setting2:works when count>1024
+    #grid_size, block_size = (count,count,1), (1,1,1)
+    
+    #Setting3:works when count>1024, faster then Setting2
+    #block_len = 32
+    #grid_len = math.ceil(num_boxes/block_len)
+    #grid_size, block_size = (grid_len,grid_len,1), (block_len,block_len,1)
+    
+    NMS_GPU(drv.In(boxes), drv.InOut(result),
+            grid=grid_size, block=block_size)
+    print(result)
+    return list(np.where(result)[0])
 
 def unique(image_pred_):
     unique_np = np.unique(image_pred_)
@@ -23,9 +56,7 @@ def bbox_iou(box1, box2):
     
     """
     #Get the coordinates of bounding boxes
-    #print("SB ba")
-    #print(box1)
-    #print(box2)
+    
     b1_x1, b1_y1, b1_x2, b1_y2 = box1[:,0], box1[:,1], box1[:,2], box1[:,3]
     b2_x1, b2_y1, b2_x2, b2_y2 = box2[:,0], box2[:,1], box2[:,2], box2[:,3]
     
@@ -43,7 +74,7 @@ def bbox_iou(box1, box2):
     b2_area = (b2_x2 - b2_x1 + 1)*(b2_y2 - b2_y1 + 1)
     
     iou = inter_area / (b1_area + b2_area - inter_area)
-    #print(iou)
+    print(iou)
     return iou
 
 def predict_transform(prediction, inp_dim, anchors, num_classes, CUDA = True):
@@ -95,7 +126,7 @@ def predict_transform(prediction, inp_dim, anchors, num_classes, CUDA = True):
     
     return prediction
 
-def write_results(prediction, confidence, num_classes, nms_conf = 0.4):
+def write_results(prediction, confidence, num_classes, cuda_code,nms_conf = 0.2):
     #confidence == 0.5
     #num_classes = 80
     #prediction = prediction.numpy() 
@@ -116,10 +147,11 @@ def write_results(prediction, confidence, num_classes, nms_conf = 0.4):
     box_corner[:,:,2] = (prediction[:,:,0] + prediction[:,:,2]/2) 
     box_corner[:,:,3] = (prediction[:,:,1] + prediction[:,:,3]/2)
     prediction[:,:,:4] = box_corner[:,:,:4]
-    #print(type(prediction))
+    print(type(prediction))
     batch_size = prediction.shape[0]
 
     write = False
+    THETA = nms_conf
     
 
 
@@ -174,42 +206,28 @@ def write_results(prediction, confidence, num_classes, nms_conf = 0.4):
             class_mask_ind = np.nonzero(cls_mask[:,-2])
             class_mask_ind = np.squeeze(class_mask_ind)
             image_pred_class = image_pred_[class_mask_ind]
-            #print("HI")
-            #print(image_pred_class)
+            print(image_pred_class)
             
             #sort the detections such that the entry with the maximum objectness
             #confidence is at the top
-            conf_sort_index = np.argsort(image_pred_class[:,4])[::-1]
+           
+            conf_sort_index = np.sort(image_pred_class[:,4])[::-1]
+            boxes =  image_pred_class[:,0:4].copy()
+            conf_scores = image_pred_class[:,4].copy()
             #print(conf_sort_index)
-            image_pred_class = image_pred_class[conf_sort_index]
-            idx = image_pred_class.shape[0]  #Number of detections
-            for i in range(idx):
-                #Get the IOUs of all boxes that come after the one we are looking at 
-                #in the loop
-                try:
-                    ious = bbox_iou(np.expand_dims(image_pred_class[i],axis = 0), image_pred_class[i+1:])
-                    #print("WTF")
-                    #print(ious)
-                except ValueError:
-                    break
-            
-                except IndexError:
-                    break
-            
-                #Zero out all the detections that have IoU > treshhold
-                iou_mask = np.expand_dims(ious < nms_conf,axis = 1)
-                #print(iou_mask)
-                image_pred_class[i+1:] *= iou_mask       
-                #print(image_pred_class)
-                #Remove the non-zero entries
-                tmp = np.nonzero(image_pred_class[:,4])
-                non_zero_ind = np.squeeze(tmp)
-                
-                image_pred_class = image_pred_class[non_zero_ind]
-                image_pred_class = np.expand_dims(image_pred_class,axis = 0)
-            #print("Got the results!!")
-            #print(image_pred_class)
-            #print("End")
+            cuda_code = string.Template(cuda_code)
+            cuda_code = cuda_code.substitute(THETA=THETA)
+            modules = SourceModule(cuda_code) 
+            # python function will change array's value, so use .copy()
+            cuda_start = time.time()
+            cuda_results = cuda_nms(modules, boxes, conf_scores, nms_conf)
+            cuda_end = time.time()
+            print("CUDA results:", cuda_results)
+            print("CUDA version takes {} seconds".format(cuda_end-cuda_start))
+            print(cuda_results)
+            index = cuda_results[0]
+            image_pred_class = np.expand_dims(image_pred_class[index], axis = 0)
+            print(image_pred_class)
             batch_ind = np.zeros((image_pred_class.shape[0], 1))
             #print(tmp)
             #batch_ind = tmp.fill_(ind)      #Repeat the batch_id for as many detections of the class cls in the image

@@ -6,7 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F 
 from torch.autograd import Variable
 import cv2 
-from darknet import *
 import time
 import myModule
 
@@ -186,7 +185,6 @@ class DarkNet:
 		pred = None
 
 		for i in range(len(self.model_cfg)):
-			print(i)
 			cfg = self.model_cfg[i]
 			model_type = cfg["type"]
 			cur_model = self.network[i]
@@ -213,7 +211,7 @@ class DarkNet:
 if __name__ == "__main__":
 	DN = DarkNet()
 	imp = []
-	for i in range(2):
+	for i in range(1):
 		im1 = cv2.imread("image/dog.jpg")
 		im1 = np.array(prep_image(im1, 416))[0]
 		
@@ -249,33 +247,15 @@ if __name__ == "__main__":
 	start = time.time()
 	imp = np.array(imp)
 	out = DN.forward(imp)
-	end = time.time()
-	print("Time taken: " + str(end - start))
-
-
-	torch_imp = torch.from_numpy(imp)
-
-	model = Darknet("cfg/yolov3.cfg")
-	model.load_weights("yolov3.weights")
-	start = time.time()
-	torch_out = model(torch_imp, False)
-	end = time.time()
-	print("Time taken: " + str(end - start))
-	rtol = 1e-04
-	atol = 1e-04
-	print(np.allclose(np.array(torch_out), out, rtol, atol))
-	'''
-	torch_imp = torch.from_numpy(imp)
-
-	model = Darknet("cfg/yolov3.cfg")
-	model.load_weights("yolov3.weights")
-	torch_out = model(torch_imp, False)
-
-	my_out = DN.forward(imp)
 
 	
 
-	print(my_out.shape)
-	print(list(torch_out.size()))
-	print(np.allclose(torch_out, my_out, rtol, atol))'''
+
+
+	
+	end = time.time()
+	print("Time taken: " + str(end - start))
+
+
+	
 
